@@ -639,3 +639,80 @@ python main.py --dry-run --config examples/search_config.example.json
 규격: https://docs.terra.tripadvisor.com/reference/locationsnearbyget
 및 https://docs.terra.tripadvisor.com/reference/locationreviewsget
 
+# 직접 Location ID 수집 모드
+
+웹에서 최근 리뷰가 있는 장소를 먼저 선별한 뒤 Reviews API만 호출하는 방식입니다.
+검색 결과의 빈 리뷰 비율이 높을 때 검색·상세 조회 비용을 줄일 수 있습니다.
+웹에 리뷰가 있어도 API가 리뷰를 반환한다는 보장은 없습니다.
+기존 `python main.py`, `--config`, 자동 검색 옵션은 그대로 사용할 수 있습니다.
+
+## CSV 준비
+
+`input/location_ids.example.csv`를 복사하고 직접 확인한 장소를 입력하세요.
+
+```powershell
+Copy-Item input/location_ids.example.csv input/location_ids.csv
+```
+
+UTF-8 CSV(BOM 허용) 형식:
+
+```csv
+region,category,location_id,name,tripadvisor_url
+광안리,RESTAURANT,27961145,젤라또조이 광안리점,https://www.tripadvisor.co.kr/Restaurant_Review-g297884-d27961145-Reviews-Gelato_Joy_Gwangalli-Busan.html
+```
+
+`region`, `category`, `name`은 필수입니다. 카테고리는 `ATTRACTION`, `HOTEL`,
+`RESTAURANT`이고 대소문자는 자동 정규화합니다. `location_id` 또는 `tripadvisor_url`
+중 하나는 입력해야 합니다. URL만 입력하면 장소 리뷰 URL의 `-d27961145-`에서
+`27961145`를 추출합니다. 둘 다 입력하면 ID가 일치해야 합니다.
+이름에 쉼표가 있으면 CSV 규칙에 따라 큰따옴표로 감싸세요.
+
+잘못된 행은 `output/location_list_errors.json`에 기록하고 제외합니다.
+파일·필수 헤더 오류는 호출 전에 실행을 중단합니다. 중복 ID는 한 번만 조회하며
+지역을 합칩니다. 중복 ID의 분류가 다르면 경고와 `category_conflict`를 저장합니다.
+기존 API 확인 분류는 보존하고 CSV 원문 메타데이터는 `manual_metadata`에 보존합니다.
+기존 분류가 없는 직접 입력 장소의 충돌 분류는 비워 둡니다.
+
+## 실행
+
+먼저 계획을 확인하세요. 직접 모드의 dry-run은 지도 조회와 API 호출을 모두 하지 않으며
+원장·리뷰·캐시를 변경하지 않습니다. 행 검증 보고서는 저장됩니다.
+
+```powershell
+.\.venv\Scripts\python.exe main.py --location-list input/location_ids.csv --run-entity-budget 50 --dry-run
+```
+
+실제 수집은 아래 명령 실행 후 `Start API collection? [y/N]`에 `y`를 입력합니다.
+
+```powershell
+.\.venv\Scripts\python.exe main.py --location-list input/location_ids.csv --run-entity-budget 50
+```
+
+직접 모드에는 `--dry-run`, `--refresh`, `--run-entity-budget`만 함께 사용할 수 있습니다.
+지역 자동 검색 옵션과는 함께 사용하지 않습니다.
+
+## 캐시, 예산, 저장
+
+- 기존 `output/cache/reviews/{ID}.json`을 공유합니다. 리뷰가 있는 캐시와 빈 결과
+  캐시 모두 재사용하므로 같은 목록을 다시 실행하면 미완료 ID만 호출합니다.
+- `--refresh`를 명시하면 추가 사용 경고와 확인 후 캐시된 ID도 다시 조회합니다.
+- 각 ID는 V1, `language=primary`, `page=1`, `size=3`, `sort_by=MOST_RECENT`로
+  최대 1회 호출합니다. 자동 재시도, 추가 페이지, 언어 변경, 상세 조회는 없습니다.
+- 예상 호출 수는 고유 ID 수에서 캐시 ID 수를 뺀 값입니다. Refresh는 고유 ID 전체가
+  대상입니다. 실제 최대 호출 수는 여기에 실행 예산(기본 50)과 누적 hard limit의
+  남은 양을 함께 적용합니다. 현재 로컬 추정은 HTTP 시도당 1이며 실패도 포함합니다.
+  실제 사용량과 과금은 대시보드가 기준입니다.
+- 원장 저장을 완료한 뒤 요청합니다. 원장 저장 실패·인증 실패는 수집을 중단합니다.
+  400/404/500 등의 개별 오류는 기록하고 다음 ID로 진행하며 빈 성공 캐시로 저장하지 않습니다.
+- 성공 응답마다 캐시를 즉시 저장하고, 결과는 주기적으로 및 종료 시 기존 JSON/Excel에
+  병합합니다. 기존 장소와 리뷰를 유지하고 리뷰 ID 중복을 제거합니다.
+- 리뷰가 있으면 기존 상태명 `complete`, HTTP 200 빈 응답은 `empty`입니다.
+  Refresh가 빈 응답을 반환해도 과거 리뷰는 유지하며 `last_review_fetch_status`에
+  이번 응답 상태를 기록합니다. HTTP 오류 상태에서도 과거 리뷰는 유지합니다.
+- `Locations` 시트에 출처, URL, 분류 충돌 컬럼을 추가했습니다. `Reviews` 시트는 동일합니다.
+  CSV 메타데이터는 JSON의 `manual_metadata`에도 남습니다.
+- 통계는 `output/direct_collection_stats.json`에 별도로 저장합니다. 성공률과 호출당
+  리뷰 수는 신규 API 호출만 기준으로 합니다. `returned_reviews`는 응답 리뷰 수,
+  `new_reviews_collected`는 기존 리뷰 ID를 제외한 신규 추가 수입니다.
+  캐시 재사용 건수는 별도로 표시합니다.
+

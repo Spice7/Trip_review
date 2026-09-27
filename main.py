@@ -8,6 +8,8 @@ from pathlib import Path
 from budget import EntityBudgetManager
 from cache_manager import CacheManager
 from collector import Collector, plan
+from direct_collector import DirectCollector, direct_plan
+from location_list import read_location_list
 from config import BASE_DIR, CATEGORIES, CITY, OUTPUT_DIR, Settings, validate_config
 from geocoder import ATTRIBUTION, BusanGeocoder
 from diagnostics import cached_filter_conflicts, comparison_plan, diagnostic_plan, run_diagnostics
@@ -121,6 +123,7 @@ def main(argv=None):
                         help="대체 검색/리뷰 언어 비교: 최대 5회, 로컬 추정 5 entities, 재시도 없음")
     parser.add_argument("--diagnose-v2", action="store_true",
                         help="고정된 두 장소의 V2 리뷰 진단: 각 1회, 재시도 없음")
+    parser.add_argument("--location-list", type=Path, help="CSV의 Location ID로 Reviews만 수집")
     parser.add_argument("--config", type=Path, help="부산 지역 이름 또는 저장된 검색 설정 JSON")
     parser.add_argument("--max-locations", type=positive_max, help="설정의 장소 수만 변경")
     parser.add_argument("--target-reviewed-locations", type=positive_max,
@@ -134,6 +137,11 @@ def main(argv=None):
     parser.add_argument("--review-priority", choices=("search_order", "review_count"),
                         help="review_count: 신규 후보 최대 5곳의 상세 확인 후 전체 리뷰 수 순으로 조회")
     args = parser.parse_args(argv)
+    if args.location_list is not None and any((args.config is not None, args.diagnose,
+            args.diagnose_compare, args.diagnose_v2, args.max_locations is not None,
+            args.target_reviewed_locations is not None, args.search_strategy is not None,
+            args.review_priority is not None, args.sync_dashboard_usage is not None)):
+        parser.error("--location-list는 --dry-run/--refresh/--run-entity-budget만 함께 사용할 수 있습니다.")
     if args.sync_dashboard_usage is not None and any(
             value for name, value in vars(args).items() if name != "sync_dashboard_usage"):
         parser.error("--sync-dashboard-usage는 다른 옵션과 함께 사용할 수 없습니다.")
@@ -192,6 +200,41 @@ def main(argv=None):
                 return 0 if all(r["http_status"] == 200 and r["returned_count"] is not None
                                 for r in results) else 2
             cache = CacheManager(OUTPUT_DIR / "cache")
+            if args.location_list is not None:
+                report = read_location_list(args.location_list)
+                write_json(OUTPUT_DIR / "location_list_errors.json", report["errors"])
+                budget.limit_run(args.run_entity_budget or 50)
+                estimates = direct_plan(report, cache, budget, args.refresh)
+                print("Direct Location Collection Plan")
+                print(json.dumps(estimates, ensure_ascii=False, indent=2))
+                print(budget.summary())
+                if args.dry_run:
+                    print("Tripadvisor API 호출: 0. Entity counter 변경: 0.")
+                    return 0
+                if not report["locations"]:
+                    print("유효한 장소가 없습니다. location_list_errors.json을 확인하세요.")
+                    return 2
+                if estimates["maximum_api_attempts_this_run"] and (
+                        not settings.api_key or settings.api_key == "your_api_key_here"):
+                    print(".env의 API Key를 확인하세요.")
+                    return 2
+                if args.refresh:
+                    print("WARNING: 캐시를 다시 조회하며 추가 entity가 사용됩니다.")
+                    if input("Continue? [y/N]: ").strip().lower() != "y":
+                        return 0
+                if input("Start API collection? [y/N]: ").strip().lower() != "y":
+                    return 0
+                client = (TripadvisorClient(settings.api_key, budget, max_attempts=1)
+                          if estimates["maximum_api_attempts_this_run"] else None)
+                try:
+                    result = DirectCollector(report, cache, budget, client, OUTPUT_DIR, args.refresh).run()
+                finally:
+                    if client is not None:
+                        client.close()
+                    print(budget.summary())
+                print("Direct Collection Statistics")
+                print(json.dumps(result, ensure_ascii=False, indent=2))
+                return 2 if result["failures"] or not result["excel_saved"] else 0
             if args.diagnose:
                 # No geocoding, collection, or cache rewrites in diagnostics.
                 config = validate_config(read_json(args.config or OUTPUT_DIR / "search_config.json"))
