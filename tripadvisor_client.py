@@ -72,7 +72,7 @@ class TripadvisorClient:
     def close(self):
         self.session.close()
 
-    def get(self, endpoint, params, *, context=""):
+    def get(self, endpoint, params, *, context="", attempts=None):
         """Strict endpoint allowlist prevents photos, multi-GET and redirects."""
         search = endpoint in ("/catalog/locations/nearby", "/locations/nearby")
         if search:
@@ -85,7 +85,8 @@ class TripadvisorClient:
             cost = 1
         else:
             raise ValueError("허용하지 않은 API endpoint입니다.")
-        for attempt in range(self.max_attempts):
+        attempt_limit = self.max_attempts if attempts is None else attempts
+        for attempt in range(attempt_limit):
             # Pace ALL requests; this also covers the stricter search limit.
             if self.last_request is not None:
                 self.sleep(max(0, 1.1 - (self.clock() - self.last_request)))
@@ -128,8 +129,8 @@ class TripadvisorClient:
                                    status=status, detail=detail)
             else:
                 header = None
-            if attempt == self.max_attempts - 1:
-                raise APIError(f"최대 시도 {self.max_attempts}회 실패: {endpoint}",
+            if attempt == attempt_limit - 1:
+                raise APIError(f"최대 시도 {attempt_limit}회 실패: {endpoint}",
                                status=response.status_code if response is not None else None)
             delay = retry_delay(header, attempt + 1)
             # Never retry earlier than Retry-After. Long waits defer to the next run.
@@ -164,6 +165,7 @@ class TripadvisorClient:
 
     def reviews(self, location_id, name=None, *, language="primary"):
         return self.get(f"/locations/{location_id}/reviews", {
+            "version": "1",
             **({"language": language} if language is not None else {}),
             "sort_by": "MOST_RECENT", "page": 1, "size": 3,
-        }, context=f"[Location] {name} [Location ID] {location_id}")
+        }, context=f"[Location] {name} [Location ID] {location_id}", attempts=1)

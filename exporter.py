@@ -11,7 +11,7 @@ from openpyxl.utils import get_column_letter
 from storage import write_json
 
 LOCATION_COLUMNS = ["regions", "category", "location_id", "name", "address", "latitude",
-                    "longitude", "rating", "review_count", "collected_review_count"]
+                    "longitude", "rating", "review_count", "collected_review_count", "review_status"]
 REVIEW_COLUMNS = ["regions", "category", "location_id", "location_name", "location_rating",
                   "review_id", "review_rating", "title", "text", "trip_type", "travel_date",
                   "published_date", "language", "review_url"]

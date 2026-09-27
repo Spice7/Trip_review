@@ -8,7 +8,7 @@ from cache_manager import CacheManager
 from collector import Collector
 from config import Settings
 from diagnostics import cached_filter_conflicts, diagnostic_plan, run_diagnostics, summarize
-from models import CategoryMismatch, location, response_metadata, search_page
+from models import location, response_metadata, search_page
 from storage import read_json, write_json
 from test_collector import FakeClient, Response, Session, config, raw_place
 from tripadvisor_client import APIError, TripadvisorClient
@@ -26,9 +26,9 @@ def test_category_comes_from_api_not_query():
     assert location(classified(1, "Experience"), "ATTRACTION")["category"] is None
 
 
-def test_mismatched_search_not_accepted():
-    with pytest.raises(CategoryMismatch):
-        search_page({"data": [{"location": classified(1, "Accommodation")}]}, "ATTRACTION", 1, 5)
+def test_mismatched_search_retains_actual_category_for_per_place_skip():
+    items, _ = search_page({"data": [{"location": classified(1, "Accommodation")}]}, "ATTRACTION", 1, 5)
+    assert items[0]["actual_categories"] == ["HOTEL"]
 
 
 def test_mismatch_stops_before_any_detail_or_review(tmp_path):
@@ -40,9 +40,10 @@ def test_mismatch_stops_before_any_detail_or_review(tmp_path):
     budget = EntityBudgetManager(tmp_path / "entity_usage.json")
     client = Mismatch(budget)
     result = Collector(config(), CacheManager(tmp_path / "cache"), budget, client, tmp_path).run()
-    assert result["stopped"] == "category_mismatch"
-    assert result["failures"] == 1 and client.calls == [("search", 1)]
-    assert not list((tmp_path / "cache/searches").glob("*.json"))
+    assert result["stopped"] is None
+    assert result["failures"] == 0 and client.calls == [("search", 1)]
+    assert result["collection_stats"]["category_mismatch_locations"] == 1
+    assert list((tmp_path / "cache/searches").glob("*.json"))
 
 
 def test_detail_mismatch_stops_before_review(tmp_path):
@@ -53,8 +54,8 @@ def test_detail_mismatch_stops_before_review(tmp_path):
     budget = EntityBudgetManager(tmp_path / "entity_usage.json")
     client = Mismatch(budget)
     result = Collector(config(), CacheManager(tmp_path / "cache"), budget, client, tmp_path).run()
-    assert result["stopped"] == "category_mismatch"
-    assert budget.estimated_used == 6
+    assert result["stopped"] is None
+    assert budget.estimated_used == 10
     assert not any(c[0] == "review" for c in client.calls)
     assert read_json(tmp_path / "reviews.json")[0]["category"] == "HOTEL"
 
@@ -171,7 +172,7 @@ def test_diagnostic_dry_run_and_decline_never_connect(tmp_path, monkeypatch, dry
 
 
 @pytest.mark.parametrize("refresh", [False, True])
-def test_normal_collection_blocks_observed_filter_conflicts(tmp_path, monkeypatch, refresh):
+def test_filter_conflicts_warn_but_reach_confirmation(tmp_path, monkeypatch, refresh):
     output = tmp_path / "output"
     cfg = config()
     cfg["categories"] = ["ATTRACTION", "HOTEL"]
@@ -188,7 +189,12 @@ def test_normal_collection_blocks_observed_filter_conflicts(tmp_path, monkeypatc
     def blocked(*args, **kwargs):
         pytest.fail("conflicting cached filters must not trigger paid collection")
     monkeypatch.setattr(cli, "TripadvisorClient", blocked)
-    monkeypatch.setattr("builtins.input", blocked)
+    confirmations = []
+    def decline(prompt):
+        confirmations.append(prompt)
+        return "n"
+    monkeypatch.setattr("builtins.input", decline)
     args = ["--config", str(output / "search_config.json")]
-    assert cli.main(args + (["--refresh"] if refresh else [])) == 2
+    assert cli.main(args + (["--refresh"] if refresh else [])) == 0
+    assert confirmations
     assert (output / "entity_usage.json").read_bytes() == before

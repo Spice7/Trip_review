@@ -84,10 +84,6 @@ def search_page(raw, category, page, size):
         # Nearby result wraps the catalog projection in `location`.
         projection = entry.get("location", entry)
         item = location(projection, category)
-        if item["actual_categories"] and category not in item["actual_categories"]:
-            raise CategoryMismatch(
-                f"검색 분류 불일치: requested={category}, id={item['location_id']}, "
-                f"actual={item['actual_categories']}. 해당 결과의 후속 호출을 중단합니다.")
         result.append(item)
     pagination = object_or_empty(raw.get("pagination"))
     total_pages = pagination.get("total_pages")

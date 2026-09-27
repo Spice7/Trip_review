@@ -11,6 +11,7 @@ from collector import Collector, plan
 from config import BASE_DIR, CATEGORIES, CITY, OUTPUT_DIR, Settings, validate_config
 from geocoder import ATTRIBUTION, BusanGeocoder
 from diagnostics import cached_filter_conflicts, comparison_plan, diagnostic_plan, run_diagnostics
+from diagnostics_v2 import LOCATION_IDS, PARAMS, run_v2_diagnostic
 from logger import setup_logging
 from storage import StateError, output_lock, read_json, write_json
 from tripadvisor_client import TripadvisorClient
@@ -80,7 +81,7 @@ def interactive_config(saved, resolver):
     if saved:
         print(json.dumps(saved, ensure_ascii=False, indent=2))
         if input("저장된 검색 지역/카테고리를 재사용할까요? [y/N]: ").strip().lower() == "y":
-            saved["max_locations"] = ask("지역/카테고리별 최대 장소 수", positive_max,
+            saved["max_locations"] = ask("최대 후보 장소 수 (효율 모드는 지역별)", positive_max,
                                          saved["max_locations"])
             return resolve_config(saved, resolver)
     names = []
@@ -89,7 +90,7 @@ def interactive_config(saved, resolver):
             "세부 지역 (여러 지역은 쉼표로 구분)").split(",") if x.strip()))
     print("1. 관광지 (ATTRACTION)  2. 호텔 (HOTEL)  3. 음식점 (RESTAURANT)  4. 전체")
     cats = ask("카테고리 선택 (예: 1,3)", categories)
-    maximum = ask("지역/카테고리별 최대 장소 수", positive_max, 5)
+    maximum = ask("지역별 최대 후보 장소 수", positive_max, 5)
     return resolve_config({"city": CITY, "regions": names, "categories": cats,
                            "max_locations": maximum}, resolver)
 
@@ -101,13 +102,28 @@ def main(argv=None):
     parser.add_argument("--diagnose", action="store_true", help="저장된 설정으로 최대 4회 API 진단 (별도 확인 필요)")
     parser.add_argument("--diagnose-compare", action="store_true",
                         help="대체 검색/리뷰 언어 비교: 최대 5회, 로컬 추정 17 entities, 재시도 없음")
+    parser.add_argument("--diagnose-v2", action="store_true",
+                        help="고정된 두 장소의 V2 리뷰 진단: 각 1회, 재시도 없음")
     parser.add_argument("--config", type=Path, help="부산 지역 이름 또는 저장된 검색 설정 JSON")
     parser.add_argument("--max-locations", type=positive_max, help="설정의 장소 수만 변경")
+    parser.add_argument("--target-reviewed-locations", type=positive_max,
+                        help="리뷰 확보 장소 목표 (효율 모드는 지역별, 캐시 포함)")
+    parser.add_argument("--search-strategy", choices=("shared", "per_category"),
+                        help="shared: 지역당 검색 경로 하나 사용, per_category: 기존 카테고리별 검색")
+    parser.add_argument("--run-entity-budget", type=positive_max,
+                        help="이번 수집의 추가 로컬 예산 (기본 50, 누적 한도도 함께 적용)")
     args = parser.parse_args(argv)
+    if args.diagnose_v2 and (args.diagnose or args.diagnose_compare or args.refresh
+                            or args.config is not None or args.max_locations is not None
+                            or args.target_reviewed_locations is not None or args.search_strategy is not None
+                            or args.run_entity_budget is not None):
+        parser.error("--diagnose-v2는 --dry-run 외 다른 실행 옵션과 함께 사용할 수 없습니다.")
     if args.diagnose and args.diagnose_compare:
         parser.error("--diagnose와 --diagnose-compare 중 하나만 선택하세요.")
     args.diagnose = args.diagnose or args.diagnose_compare
-    if args.diagnose and (args.refresh or args.max_locations is not None):
+    if args.diagnose and (args.refresh or args.max_locations is not None
+                         or args.target_reviewed_locations is not None or args.search_strategy is not None
+                         or args.run_entity_budget is not None):
         parser.error("--diagnose는 --refresh/--max-locations와 함께 사용할 수 없습니다.")
     if sys.version_info < (3, 12):
         parser.error("Python 3.12 이상이 필요합니다.")
@@ -117,6 +133,25 @@ def main(argv=None):
         log.info("실행 시작 dry_run=%s refresh=%s", args.dry_run, args.refresh)
         with output_lock(OUTPUT_DIR):
             budget = EntityBudgetManager(OUTPUT_DIR / "entity_usage.json", settings.hard_limit)
+            if args.diagnose_v2:
+                print(f"V2 리뷰 진단: {', '.join(LOCATION_IDS)} / 각 1회, 총 2회, 재시도 없음")
+                print(json.dumps(PARAMS, ensure_ascii=False))
+                print("로컬 예산 2 사용. 응답이 없거나 메타데이터가 없으면 null로 표시합니다.")
+                if args.dry_run:
+                    print("API 호출 0회, entity 변경 0.")
+                    return 0
+                if not settings.api_key or settings.api_key == "your_api_key_here":
+                    print(".env의 API Key를 확인하세요.")
+                    return 2
+                if budget.remaining < 2:
+                    print("V2 진단에 필요한 로컬 예산 2가 부족합니다.")
+                    return 2
+                if input("지정한 두 장소에 V2 리뷰 API를 총 2회 호출할까요? [y/N]: ").strip().lower() != "y":
+                    return 0
+                path, results = run_v2_diagnostic(settings.api_key, budget, OUTPUT_DIR)
+                print(f"진단 저장: {path}")
+                return 0 if all(r["http_status"] == 200 and r["returned_count"] is not None
+                                for r in results) else 2
             cache = CacheManager(OUTPUT_DIR / "cache")
             if args.diagnose:
                 # No geocoding, collection, or cache rewrites in diagnostics.
@@ -161,12 +196,23 @@ def main(argv=None):
                 resolver.close()
             if args.max_locations is not None:
                 config["max_locations"] = args.max_locations
+            if args.target_reviewed_locations is not None:
+                config["target_reviewed_locations"] = args.target_reviewed_locations
+            if args.search_strategy is not None:
+                config["search_strategy"] = args.search_strategy
+            config = validate_config(config)
+            budget.limit_run(args.run_entity_budget or 50)
             write_json(OUTPUT_DIR / "search_config.json", config)
             estimates = plan(config, cache, budget, args.refresh)
             conflicts = cached_filter_conflicts(config, cache)
             print("\n========================================")
             print("DRY RUN" if args.dry_run else "Collection Plan")
             print(json.dumps({**config, **estimates}, ensure_ascii=False, indent=2))
+            print(f"이번 실행 추가 로컬 예산: {args.run_entity_budget or 50} (누적 한도와 함께 적용)")
+            if config["search_strategy"] == "shared":
+                print("효율 모드: 지역당 기존 검색 경로 하나를 이어가며 지역을 번갈아 처리합니다.")
+                print("후보 한도/리뷰 확보 목표는 지역별 합계입니다. 카테고리별 목표가 아닙니다.")
+                print("대표 검색 조건은 실제 분류를 뜻하지 않습니다. 카테고리별 전체 탐색은 보장하지 않습니다.")
             for region in config["regions"]:
                 parts = len(search_areas(region))
                 if parts > 1:
@@ -180,17 +226,17 @@ def main(argv=None):
             if conflicts:
                 print("[검색 분류 확인 필요] 다른 카테고리의 검색 캐시에 동일 장소 목록이 있습니다.")
                 print(json.dumps(conflicts, ensure_ascii=False, indent=2))
-                print("기존 파일을 보존했습니다. --diagnose --dry-run으로 제한 진단 계획을 확인하세요.")
+                print("중복 장소는 캐시를 재사용합니다. 확인된 분류 불일치는 해당 장소만 건너뜁니다.")
             if args.dry_run:
                 print("Tripadvisor API 호출: 0. Entity counter 변경: 0.")
                 print(budget.summary())
                 log.info("실행 종료: dry run")
                 return 0
-            if conflicts:
-                print("분류 문제를 확인하기 전에는 일반 수집을 시작하지 않습니다.")
-                return 2
             if not settings.api_key or settings.api_key == "your_api_key_here":
                 print(".env에 TRIPADVISOR_API_KEY를 설정하세요. 실제 API는 호출하지 않았습니다.")
+                return 2
+            if budget.remaining == 0:
+                print("누적 로컬 예산이 소진됐습니다. 원장을 유지하고 .env 한도를 명시적으로 조정해야 합니다.")
                 return 2
             if args.refresh:
                 print("WARNING: Refreshing cached API data will consume additional Tripadvisor entities.")

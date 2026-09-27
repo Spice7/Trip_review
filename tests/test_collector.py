@@ -286,7 +286,7 @@ def test_retries_charge_every_attempt_and_use_retry_after(tmp_path):
                        requests.Timeout("secret must never be logged"), Response({"data": []})])
     sleeps = []
     client = TripadvisorClient("secret", budget, session=session, sleep=sleeps.append)
-    assert client.reviews("1") == {"data": []}
+    assert client.details("1") == {"data": []}
     assert budget.estimated_used == 3 and 4 in sleeps
     assert retry_delay("Wed, 01 Jan 2020 00:00:00 GMT", 1) == 2
 
@@ -296,7 +296,7 @@ def test_429_retries_are_bounded(tmp_path):
     session = Session([Response(status=429)] * 3)
     client = TripadvisorClient("secret", budget, session=session, sleep=lambda n: None)
     with pytest.raises(APIError):
-        client.reviews("1")
+        client.details("1")
     assert len(session.calls) == 3 and budget.estimated_used == 3
 
 

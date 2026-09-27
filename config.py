@@ -24,8 +24,8 @@ class Settings:
         values = dotenv_values(path)  # Intentionally read the key only from .env.
         key = (values.get("TRIPADVISOR_API_KEY") or "").strip()
         limit = int(values.get("HARD_ENTITY_BUDGET") or "800")
-        if not 1 <= limit <= 1000:
-            raise ValueError("HARD_ENTITY_BUDGET은 1~1000 정수여야 합니다.")
+        if limit < 1:
+            raise ValueError("HARD_ENTITY_BUDGET은 양의 정수여야 합니다.")
         url = values.get("GEOCODING_URL") or "https://nominatim.openstreetmap.org/search"
         if not url.startswith("https://"):
             raise ValueError("GEOCODING_URL은 HTTPS 주소여야 합니다.")
@@ -42,12 +42,18 @@ def validate_config(data):
     regions = data.get("regions")
     cats = data.get("categories")
     maximum = data.get("max_locations")
+    strategy = data.get("search_strategy", "shared")
+    if strategy not in ("shared", "per_category"):
+        raise ValueError("search_strategy는 shared 또는 per_category여야 합니다.")
     if not city or not isinstance(regions, list) or not regions:
         raise ValueError("도시와 하나 이상의 세부 지역이 필요합니다.")
     if not isinstance(cats, list) or not cats or any(c not in CATEGORIES for c in cats):
         raise ValueError("categories에는 ATTRACTION/HOTEL/RESTAURANT를 지정하세요.")
     if type(maximum) is not int or not 1 <= maximum <= 1000:
         raise ValueError("최대 장소 수는 1~1000 정수여야 합니다.")
+    target = data.get("target_reviewed_locations")
+    if target is not None and (type(target) is not int or not 1 <= target <= maximum):
+        raise ValueError("target_reviewed_locations는 1~max_locations 정수여야 합니다.")
     validated = []
     for r in regions:
         if not isinstance(r, dict) or not isinstance(r.get("name"), str) or not r["name"].strip():
@@ -72,4 +78,6 @@ def validate_config(data):
             raise ValueError("중복 지역 이름이 있습니다.")
         validated.append(region)
     return {"city": city, "regions": validated,
-            "categories": list(dict.fromkeys(cats)), "max_locations": maximum}
+            "search_strategy": strategy,
+            "categories": list(dict.fromkeys(cats)), "max_locations": maximum,
+            **({"target_reviewed_locations": target} if target is not None else {})}
