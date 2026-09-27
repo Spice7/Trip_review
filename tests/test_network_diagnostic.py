@@ -13,4 +13,4 @@ def test_network_failure_stops_remaining_diagnostic_requests(tmp_path):
     _, report = run_diagnostics(diagnostic_plan(config(), tmp_path), config(), client, tmp_path)
     assert report["stopped"] == "network_error"
     assert len(session.calls) == 1
-    assert budget.estimated_used == 5
+    assert budget.estimated_used == 1

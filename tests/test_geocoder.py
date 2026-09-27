@@ -131,9 +131,9 @@ def test_named_config_dry_run_with_mocked_geocoding_only(tmp_path, monkeypatch, 
     monkeypatch.setattr(cli, "TripadvisorClient", blocked)
     assert cli.main(["--dry-run", "--config", str(path)]) == 0
     saved = read_json(tmp_path / "output/search_config.json")
-    assert len(saved["regions"]) == 3
+    assert saved is None  # Dry run does not overwrite collection settings.
     assert not (tmp_path / "output/entity_usage.json").exists()
-    assert '"additional_entities_without_retries": 45' in capsys.readouterr().out
+    assert '"additional_entities_without_retries": 33' in capsys.readouterr().out
     before = copy.deepcopy(session.calls)
     assert cli.main(["--dry-run", "--config", str(path)]) == 0
     assert session.calls == before

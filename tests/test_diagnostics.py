@@ -34,7 +34,7 @@ def test_mismatched_search_retains_actual_category_for_per_place_skip():
 def test_mismatch_stops_before_any_detail_or_review(tmp_path):
     class Mismatch(FakeClient):
         def nearby(self, *args):
-            self.budget.reserve(5)
+            self.budget.reserve(1)
             self.calls.append(("search", 1))
             return {"data": [{"location": classified(1, "Accommodation")}]}
     budget = EntityBudgetManager(tmp_path / "entity_usage.json")
@@ -55,7 +55,7 @@ def test_detail_mismatch_stops_before_review(tmp_path):
     client = Mismatch(budget)
     result = Collector(config(), CacheManager(tmp_path / "cache"), budget, client, tmp_path).run()
     assert result["stopped"] is None
-    assert budget.estimated_used == 10
+    assert budget.estimated_used == 6
     assert not any(c[0] == "review" for c in client.calls)
     assert read_json(tmp_path / "reviews.json")[0]["category"] == "HOTEL"
 
@@ -121,7 +121,7 @@ def test_diagnostic_plan_bound_and_preservation(tmp_path):
     write_json(tmp_path / "entity_usage.json", {"estimated_used": 65})
     reviews_before = (tmp_path / "reviews.json").read_bytes()
     plan = diagnostic_plan(cfg, tmp_path)
-    assert plan["max_calls"] == 4 and plan["max_entities"] == 16
+    assert plan["max_calls"] == 4 and plan["max_entities"] == 4
     assert plan["retries"] == 0
     session = Session([Response({"data": [{"location": classified(1, "Accommodation")}]}),
                        Response({"data": [{"location": classified(1, "Accommodation")}]}),
@@ -130,7 +130,7 @@ def test_diagnostic_plan_bound_and_preservation(tmp_path):
     client = TripadvisorClient("offline", EntityBudgetManager(tmp_path / "entity_usage.json"),
                                session=session, sleep=lambda n: None, max_attempts=1)
     path, report = run_diagnostics(plan, cfg, client, tmp_path)
-    assert client.budget.estimated_used == 81 and len(session.calls) == 4
+    assert client.budget.estimated_used == 69 and len(session.calls) == 4
     assert report["results"][2]["status"] == 400
     assert report["results"][0]["response"]["items"][0]["actual_categories"] == ["HOTEL"]
     assert path.exists() and (tmp_path / "reviews.json").read_bytes() == reviews_before
@@ -144,7 +144,7 @@ def test_diagnostic_429_no_retries(tmp_path):
     client = TripadvisorClient("offline", EntityBudgetManager(tmp_path / "entity_usage.json"),
                                session=session, sleep=lambda n: None, max_attempts=1)
     run_diagnostics(plan, cfg, client, tmp_path)
-    assert len(session.calls) == 2 and client.budget.estimated_used == 10
+    assert len(session.calls) == 2 and client.budget.estimated_used == 2
 
 
 def test_diagnostic_summary_has_no_photos_or_reviewer():

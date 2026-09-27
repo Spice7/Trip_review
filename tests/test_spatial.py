@@ -30,7 +30,7 @@ def test_partition_covers_original_box_without_overlap():
 def test_partition_shares_location_limit_and_resumes(tmp_path):
     class Sparse(FakeClient):
         def nearby(self, area, category, page, city):
-            self.budget.reserve(5)
+            self.budget.reserve(1)
             tile = search_areas(region()).index(area)
             self.calls.append(("search", tile, page))
             return {"data": [{"location": raw_place(tile * 2 + i)} for i in (1, 2)],

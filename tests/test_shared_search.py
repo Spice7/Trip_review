@@ -31,7 +31,7 @@ def test_one_search_stream_for_three_categories_and_resume(tmp_path):
     assert estimates["maximum_candidate_locations"] == 5
     collector.run()
     assert len([c for c in client.calls if c[0] == "search"]) == 1
-    assert budget.estimated_used == 15
+    assert budget.estimated_used == 11
     _, _, second, resumed = setup(tmp_path, cfg)
     resumed.run()
     assert second.calls == []
@@ -79,20 +79,20 @@ def test_shared_search_does_not_reject_other_selected_actual_category(tmp_path):
 def test_region_rotation_uses_disjoint_batches(tmp_path):
     class Regional(FakeClient):
         def nearby(self, region, category, page, city):
-            self.budget.reserve(5)
+            self.budget.reserve(1)
             self.calls.append(("search", region["name"], page))
             offset = 100 if region["name"] == "Fixture B" else 0
             return {"data": [{"location": raw_place(i)} for i in
                              range(offset + (page-1)*5+1, offset + page*5+1)],
                     "pagination": {"total_pages": 2}}
     budget, _, client, collector = setup(tmp_path, shared_config(10, True), Regional)
-    budget.limit_run(35)
+    budget.limit_run(23)
     result = collector.run()
     assert [c for c in client.calls if c[0] == "search"][:2] == [
         ("search", "Fixture A", 1), ("search", "Fixture B", 1)]
     assert result["collection_stats"]["by_region"]["Fixture A"]["review_api_calls"] == 5
     assert result["collection_stats"]["by_region"]["Fixture B"]["review_api_calls"] == 5
-    assert result["stopped"] == "budget" and budget.estimated_used == 35
+    assert result["stopped"] == "budget" and budget.estimated_used == 23
 
 
 def test_shared_target_counts_cached_reviews_across_categories(tmp_path):

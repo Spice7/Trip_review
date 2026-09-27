@@ -3,12 +3,27 @@
 import json
 import os
 import tempfile
+import time
 from contextlib import contextmanager
 from pathlib import Path
 
 
 class StateError(RuntimeError):
     pass
+
+
+def replace_with_retry(source, target):
+    """Eight bounded atomic replace attempts for transient Windows sharing locks."""
+    delays = (0.05, 0.1, 0.2, 0.4, 0.8, 1.0, 1.0)
+    for attempt in range(len(delays) + 1):
+        try:
+            os.replace(source, target)
+            return
+        except OSError as exc:
+            transient = isinstance(exc, PermissionError) or getattr(exc, "winerror", None) in (5, 32, 33)
+            if not transient or attempt == len(delays):
+                raise
+            time.sleep(delays[attempt])
 
 
 def read_json(path: Path, default=None):
@@ -29,10 +44,13 @@ def write_json(path: Path, data):
             json.dump(data, stream, ensure_ascii=False, indent=2, allow_nan=False)
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(name, path)
+        replace_with_retry(name, path)
     finally:
         if os.path.exists(name):
-            os.unlink(name)
+            try:
+                os.unlink(name)
+            except OSError:
+                pass  # Preserve the original write error if cleanup is also locked.
 
 
 @contextmanager

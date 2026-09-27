@@ -78,9 +78,9 @@ class TripadvisorClient:
         if search:
             if params.get("size") != PAGE_SIZE:
                 raise ValueError("Search page size must remain fixed")
-            # Official pricing bills per returned ID, NOT per search request.
-            # Reserve the maximum possible response, even for empty/failed attempts.
-            cost = PAGE_SIZE
+            # Account-specific Dashboard observation: one estimate unit per HTTP attempt.
+            # This is not a universal Tripadvisor pricing rule.
+            cost = 1
         elif re.fullmatch(r"/locations/[0-9]+(?:/reviews)?", endpoint):
             cost = 1
         else:

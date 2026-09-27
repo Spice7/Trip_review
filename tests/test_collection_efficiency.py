@@ -117,9 +117,9 @@ def test_review_transport_single_attempt_and_v1_params(tmp_path, failure):
 
 
 def test_budget_block_is_not_counted_as_request(tmp_path):
-    # Search 5 + first details 1 fills the budget before first review.
-    budget, _, _, result = execute(tmp_path, config(), FakeClient, limit=6)
-    assert result["stopped"] == "budget" and budget.estimated_used == 6
+    # Search 1 + first details 1 fills the budget before first review.
+    budget, _, _, result = execute(tmp_path, config(), FakeClient, limit=2)
+    assert result["stopped"] == "budget" and budget.estimated_used == 2
     assert result["collection_stats"]["review_api_calls"] == 0
 
 
@@ -169,7 +169,7 @@ def test_authentication_still_stops_all_collection(tmp_path):
 def test_search_mismatch_skips_only_that_candidate(tmp_path):
     class MixedSearch(FakeClient):
         def nearby(self, *args):
-            self.budget.reserve(5)
+            self.budget.reserve(1)
             self.calls.append(("search", 1))
             return {"data": [{"location": classified(1, "Accommodation")},
                              {"location": classified(2, "Eat & Drink")} ]}

@@ -75,7 +75,7 @@ class FakeClient:
         self.fail, self.interrupt, self.empty = fail, interrupt, empty
 
     def nearby(self, region, category, page, city):
-        self.budget.reserve(5)
+        self.budget.reserve(1)
         self.calls.append(("search", page))
         items = [] if self.empty else [
             {"location": raw_place(i)} for i in range((page - 1) * 5 + 1, page * 5 + 1)]
@@ -160,16 +160,16 @@ def test_cache_miss_empty_hit_and_corruption(tmp_path):
 
 def test_duplicate_resume_and_increase_limit(tmp_path):
     first, cache, client, result = run_fake(tmp_path, config(second=True))
-    assert first.estimated_used == 20  # Two searches, five details, five reviews.
+    assert first.estimated_used == 12  # Two searches, five details, five reviews.
     assert len([c for c in client.calls if c[0] == "review"]) == 5
     places = read_json(tmp_path / "reviews.json")
     assert len(places) == 5 and len(places[0]["regions"]) == 2
     assert all(p["collected_review_count"] == 3 for p in places)
     second, _, client, _ = run_fake(tmp_path, config(second=True))
-    assert not client.calls and second.estimated_used == 20
+    assert not client.calls and second.estimated_used == 12
     estimate = plan(config(10, second=True), cache, second)
     third, _, client, _ = run_fake(tmp_path, config(10, second=True))
-    assert third.estimated_used == 40
+    assert third.estimated_used == 24
     assert {c[1] for c in client.calls if c[0] == "review"} == {"6", "7", "8", "9", "10"}
     assert third.estimated_used - second.estimated_used <= estimate["additional_entities_without_retries"]
 
@@ -177,7 +177,7 @@ def test_duplicate_resume_and_increase_limit(tmp_path):
 def test_refresh_deduplicates_and_accumulates(tmp_path):
     run_fake(tmp_path, config(second=True))
     budget, _, client, _ = run_fake(tmp_path, config(second=True), refresh=True)
-    assert budget.estimated_used == 40
+    assert budget.estimated_used == 24
     assert len([c for c in client.calls if c[0] == "review"]) == 5
 
 
@@ -211,7 +211,7 @@ def test_budget_stop_exports_partial_and_resumes(tmp_path):
 
 def test_empty_search_is_cached(tmp_path):
     budget, _, _, result = run_fake(tmp_path, config(), empty=True)
-    assert result["locations"] == 0 and budget.estimated_used == 5
+    assert result["locations"] == 0 and budget.estimated_used == 1
     _, _, client, _ = run_fake(tmp_path, config())
     assert not client.calls
 
@@ -275,7 +275,7 @@ def test_search_reserves_page_cost_and_rate_limits(tmp_path):
     client = TripadvisorClient("secret", budget, session=session, sleep=sleeps.append, clock=lambda: 0)
     for page in (1, 2):
         client.nearby(config()["regions"][0], "HOTEL", page, "fixture")
-    assert budget.estimated_used == 10
+    assert budget.estimated_used == 2
     assert 1.1 in sleeps
     assert all(c[1]["params"]["size"] == 5 for c in session.calls)
 

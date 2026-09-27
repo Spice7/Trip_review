@@ -1,6 +1,75 @@
 # Tripadvisor Terra Review Collector
 
+## Dashboard 동기화와 HTTP 시도 기준 사용량
+
+사용자가 현재 Discover 계정에서 확인한 사례(2026-09-27):
+무료 잔여량 466/1,000, 사용량 534. Requests by type은 Catalog 검색 107 + 상세 211 +
+리뷰 214 + Locations 검색 2 = **534 requests = 534 free usage consumed**였습니다.
+따라서 이 프로젝트의 local billing estimate는 허용된 **HTTP attempt당 1**로 계산합니다.
+검색 결과가 0개/5개여도 요청 시도는 1이며, 재시도는 추가 1입니다. 실패/타임아웃도
+로컬에서는 예약량을 환불하지 않으므로 Dashboard와 차이가 날 수 있습니다.
+이는 현재 계정의 관찰에 맞춘 추정 모델이며 Tripadvisor 전체의 보편적인 과금 규칙을 뜻하지 않습니다.
+**Dashboard가 실제 사용량/과금의 최종 기준입니다.**
+
+이전 버전은 검색 한 번에 PAGE_SIZE=5를 예약하고 실패 시도도 포함해 로컬 사용량을
+과대 추정했습니다. 기존 원장은 코드 변경으로 자동 보정하지 않습니다.
+다른 수집 프로세스를 종료하고 최신 Dashboard 사용량을 확인한 후 명시적으로 동기화하세요.
+
+```powershell
+.\.venv\Scripts\python.exe main.py --sync-dashboard-usage 534
+```
+
+현재값과 새 값을 확인하고 `y`로 승인하면 `output/entity_usage.backup_<UTC시간>.json`에
+기존 원본을 백업한 뒤 기준값을 바꿉니다. API를 호출하지 않습니다. 동기화 시각, 이전 값,
+Dashboard 값과 누적 동기화 이력이 원장에 남으며 다음 요청에서도 유지됩니다.
+다른 수집/진단 옵션과 함께 사용할 수 없고, 음수나 누적 한도를 넘는 값은 거부합니다.
+승인을 거부하면 원장을 바꾸지 않습니다. 백업 또는 원장 저장이 실패해도 수집은 시작하지 않습니다.
+
+무료 1,000 이후 유료 약 300까지 사용하려면 `.env`에 `HARD_ENTITY_BUDGET=1300`을
+명시적으로 설정하세요. 기본값은 800이며 `.env.example`은 1000 예시를 제공합니다.
+1,000 초과 한도에서는 유료 가능성, 무료 한도까지의 추정 잔여량, 최대 유료 추정량을
+표시합니다. 별도의 중복 승인은 추가하지 않고 기존 실행 확인에서 진행 여부를 선택합니다.
+로컬 제한은 실제 청구액을 보장하지 않으므로 대시보드도 함께 확인하세요.
+
+`--run-entity-budget 50`은 이번 실행에 추가 HTTP 시도를 최대 50회 허용합니다.
+534로 동기화했다면 실행 ceiling은 584이며, 누적 한도 1300과 동시에 적용됩니다.
+
+```powershell
+.\.venv\Scripts\python.exe main.py --config output/search_config.json --search-strategy shared --max-locations 130 --target-reviewed-locations 80 --run-entity-budget 50 --dry-run
+# 위 계획 확인 후 --dry-run만 제거하여 실제 수집
+```
+
+### Windows 원장 저장
+
+JSON 저장은 임시 파일 기록/fsync 후 atomic replace를 유지합니다. PermissionError 및
+Windows 오류 5/32/33이면 최대 8회 교체를 시도하며, 대기는 0.05/0.1/0.2/0.4/0.8/1/1초입니다.
+잠금이 풀리지 않거나 영구적인 권한 문제면 예외로 종료합니다. 원장 저장 실패 후 API를
+보내지 않으며, 기존 대상 파일을 먼저 지우거나 직접 덮어쓰지 않습니다. 임시 파일은 가능한
+경우 정리합니다. 지속적인 접근 거부는 파일을 점유한 프로그램이나 쓰기 권한 확인이 필요합니다.
+
 ## 실제 수집 실행
+
+### 선택 옵션: 전체 리뷰 수 우선 조회
+
+`--review-priority review_count`를 지정하면 후보 최대 5곳씩 상세 정보를 확인한 뒤,
+해당 그룹 안에서 전체 리뷰 수가 많은 장소부터 리뷰를 요청합니다. 전체 후보를 미리 모두
+조회해서 정렬하지 않습니다. 상세 요청도 HTTP 시도당 1로 예산에 포함되고 재시도도 포함됩니다.
+이 옵션은 조회 순서만 바꾸며, 낮은 리뷰 수를 이유로 장소를 영구 제외하지 않습니다.
+명시적 전체 리뷰 수 0은 기존처럼 생략하고, 누락/None은 그룹 뒤에서 정상 조회합니다.
+
+캐시의 성공 장소를 먼저 목표에 포함하고, 빈 리뷰는 재조회하지 않습니다. 상세만 확인한
+상태에서 목표 도달/예산 소진/사용자 중단이 발생하면 상세 캐시가 남아 다음 실행에서 재사용됩니다.
+예산이 얼마 없으면 그룹을 더 작게 준비할 수 있습니다. 상세 요청의 실패/재시도 때문에
+리뷰를 조회하기 전에 예산이 끝날 수 있으므로 확보율 개선을 보장하지 않습니다.
+선행 상세 조회가 필요해, 작은 목표에서는 기존 순서보다 상세 조회가 더 발생할 수 있습니다.
+
+```powershell
+.\.venv\Scripts\python.exe main.py --config output/search_config.json --search-strategy shared --max-locations 130 --target-reviewed-locations 80 --review-priority review_count --run-entity-budget 20 --dry-run
+```
+
+계획 확인 후 `--dry-run`만 제거해 소규모로 비교하세요. 실제 수집 실행 시 선택이 설정 파일에
+저장됩니다. 기존 방식은 `--review-priority search_order`이며, 설정이 없을 때의 기본값입니다.
+dry run은 설정 파일에 선택을 저장하지 않습니다.
 
 기본값은 `search_strategy=shared` 효율 모드입니다. 지역마다 가장 많이 진행된 검색
 카테고리의 캐시/다음 페이지를 이어가며, 다른 카테고리 캐시에만 있는 후보도 재사용합니다.
@@ -95,11 +164,11 @@
 .\.venv\Scripts\python.exe main.py --diagnose
 ```
 
-현재 설정에서는 다음 4회, **최대 16 entities**를 예약합니다. 자동 재시도는 없습니다.
+현재 설정에서는 다음 4회, **최대 4 entities**를 예약합니다. 자동 재시도는 없습니다.
 
-1. 광안리 관광지 검색 1회: 최대 5
-2. 같은 영역의 호텔 검색 1회: 최대 5 (분류 필터 비교)
-3. 가장 큰 사각 검색 영역인 남구의 분할 구역 1개 관광지 검색: 최대 5
+1. 광안리 관광지 검색 1회: 1
+2. 같은 영역의 호텔 검색 1회: 1 (분류 필터 비교)
+3. 가장 큰 사각 검색 영역인 남구의 분할 구역 1개 관광지 검색: 1
 4. 전체 리뷰 수는 있으나 캐시가 빈 장소의 리뷰 조회 1회: 1
 
 위 대상은 저장된 설정·결과에서 선택하며 실제 대상 ID와 영역은 실행 계획에 출력됩니다.
@@ -128,7 +197,7 @@ Catalog 응답에는 실제 분류 필드가 없었습니다. 호텔 3965013의 
 계정의 리뷰 제공 범위 원인은 아직 미확정입니다. 일반 수집은 분류 불일치 장소만 제외하고 계속합니다.
 
 첫 진단은 실행 환경의 네트워크 제한으로 4회 실패했습니다. 접근 허용과 추가 예약량을
-안내하고 승인받아 4회를 재실행했습니다. 로컬 추정량은 65→81→97이며, 첫 실패 시도도
+안내하고 승인받아 4회를 재실행했습니다. 당시 구형 모델의 로컬 추정량은 65→81→97이며, 첫 실패 시도도
 보수적으로 포함한 값입니다. 실제 과금은 Dashboard에서 확인하세요. 후속 버전은 진단 중
 네트워크 오류가 발생하면 즉시 중단해 남은 진단 요청의 로컬 예약을 방지합니다.
 
@@ -244,7 +313,8 @@ python main.py --config output/search_config.json --max-locations 10
 - `1,3`: 관광지와 음식점
 
 최대 장소 수는 효율 모드에서 **지역별**, `per_category` 모드에서는 지역/카테고리별로 적용됩니다.
-예: 3개 지역 × 3개 카테고리 × 5개 = 최대 후보 45개입니다.
+예: per_category 모드는 3지역 × 3카테고리 × 5개 = 최대 후보 45개,
+shared 모드는 3지역 × 5개 = 최대 후보 15개입니다.
 지역 사이의 중복은 `location_id`로 제거하므로 고유 장소 수는 더 적을 수 있습니다.
 
 ## 4. Dry run
@@ -273,8 +343,8 @@ Maximum candidate locations: 15
 Estimated search calls: 3
 Estimated maximum detail calls: 15
 Estimated maximum review calls: 15
-Additional entities without retries: 45
-Additional entities with all retries: 135
+Additional entities without retries: 33
+Additional entities with all retries: 69
 Current accumulated usage: 0
 Hard limit: 800
 Remaining budget: 800
@@ -296,13 +366,12 @@ Tripadvisor API 호출: 0. Entity counter 변경: 0.
 
 | 작업 | Endpoint | 요청 직전 예약하는 entity |
 |---|---|---:|
-| 좌표로 후보 검색 | `GET /api/catalog/locations/nearby` | 5 (고정 page size) |
+| 좌표로 후보 검색 | `GET /api/catalog/locations/nearby` | 1 |
 | 장소 상세 | `GET /api/locations/{id}` | 1 |
 | 최신 리뷰 | `GET /api/locations/{id}/reviews` | 1 |
 
-**Catalog 검색도 반환된 장소 수만큼 과금됩니다.** 검색 1회를 1 entity로 세지 않습니다.
-응답 전에는 반환 수를 알 수 없으므로 최대 반환 수인 5를 미리 예약합니다.
-실제로 0~4개만 반환해도 로컬 추정치에서 환불하지 않습니다.
+현재 계정의 Dashboard 관찰에 맞춰 모든 허용 endpoint의 HTTP 시도마다 1을 예약합니다.
+반환 장소/리뷰 개수와 관계없이 예약하며, HTTP 오류나 타임아웃도 자동 환불하지 않습니다.
 상세 조회는 Catalog의 간략한 데이터에 없을 수 있는 이름/주소/좌표/평점/전체 리뷰 수를
 확보하기 위한 것이며, 장소별로 한 번씩 캐시합니다. Multi-GET은 사용하지 않습니다.
 
@@ -316,16 +385,16 @@ Discover의 최대 3개라는 전제에 따라 반환 데이터도 최대 3개�
 S = 새로 조회할 검색 페이지 수
 D = 상세 캐시가 없는 후보 장소 수의 상한
 R = 리뷰 캐시가 없는 후보 장소 수의 상한
-재시도 없는 추가 entity 상한 = 5 × S + D + R
-모든 요청이 3번 시도되는 경우 상한 = 3 × (5 × S + D + R)
+재시도 없는 추가 entity 상한 = S + D + R
+검색/상세 최대 3회, 리뷰 1회 시도 상한 = 3 × (S + D) + R
 ```
 
 캐시가 없는 3지역 × 3카테고리 × 5개는 검색 9회, 상세 최대 45회, 리뷰 최대 45회이므로
-최대 **135 entities**, 모든 요청이 최대 재시도되는 경우 **405**입니다.
+per_category 모드에서 최대 **99 entities**, 검색/상세 최대 재시도 포함 **207**입니다.
 이미 알려진 중복 ID는 계획에서도 한 번만 셉니다. 아직 검색하지 않은 결과의 중복은
 알 수 없으므로 상한을 높게 잡습니다. 실제 과금은 Dashboard가 최종 기준입니다.
 
-이 계산은 공식 endpoint의 페이지 크기 제한과 과금 계약을 전제로 합니다.
+이 계산은 현재 계정의 Dashboard에서 관찰한 HTTP 요청 수와 사용량 관계를 전제로 합니다.
 요금/계약이 바뀌거나 이 코드 외부에서 사용하는 같은 키의 호출량까지 자동으로
 보장하지는 않습니다. 다른 팀원이 별도 폴더/PC에서 같은 키를 사용하는 경우에도
 원장이 자동 합쳐지지 않습니다. **한 계정은 하나의 관리되는 원장으로 운영하세요.**
@@ -553,7 +622,7 @@ python main.py --dry-run --config examples/search_config.example.json
 ```
 
 첫 명령은 API를 호출하지 않습니다. 두 번째는 `y` 확인 후 최대 5회,
-보수적인 로컬 예산 최대 17 entities를 예약합니다. 재시도는 없습니다.
+현재 모델의 로컬 예산 최대 5 entities를 예약합니다. 재시도는 없습니다.
 기존 검색 설정을 이용하고 리뷰/Excel/캐시는 덮어쓰지 않습니다.
 `output/diagnostics/api_*.json`에 결과와 `findings`를 저장합니다.
 

@@ -3,7 +3,6 @@
 from datetime import datetime, timezone
 
 from budget import BudgetExceeded
-from config import PAGE_SIZE
 from models import (SchemaError, actual_categories, identifier, object_or_empty,
                     page_data, response_metadata)
 from storage import read_json, write_json
@@ -29,19 +28,19 @@ def cached_filter_conflicts(config, cache):
 
 
 def diagnostic_plan(config, root):
-    """Two category comparisons, largest bbox, one cached-empty review. <= 16 entities."""
+    """Two category comparisons, largest bbox, one cached-empty review. <= 4 attempts."""
     jobs = []
     first = next((r for r in config["regions"] if r.get("search_mode") != "bbox"),
                  config["regions"][0])
     for category in ("ATTRACTION", "HOTEL"):
         jobs.append({"kind": "search", "region": search_areas(first)[0],
-                     "category": category, "cost": PAGE_SIZE})
+                     "category": category, "cost": 1})
     boxes = [r for r in config["regions"] if r.get("search_mode") == "bbox"]
     if boxes:
         largest = max(boxes, key=lambda r: (r["ne_lat"] - r["sw_lat"]) * (r["ne_lon"] - r["sw_lon"]))
         if largest != first:
             jobs.append({"kind": "search", "region": search_areas(largest)[0], "category": "ATTRACTION",
-                         "cost": PAGE_SIZE})
+                         "cost": 1})
     records = read_json(root / "reviews.json", [])
     empty = next((p for p in records if not p.get("reviews") and (p.get("review_count") or 0) > 0), None)
     if empty:

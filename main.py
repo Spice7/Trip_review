@@ -39,6 +39,23 @@ def positive_max(value):
     return result
 
 
+def nonnegative_int(value):
+    result = int(value)
+    if result < 0:
+        raise ValueError("음수는 사용할 수 없습니다.")
+    return result
+
+
+def paid_usage_warning(budget):
+    if budget.hard_limit > 1000:
+        print(f"WARNING: 현재 HARD_ENTITY_BUDGET={budget.hard_limit} 입니다.")
+        print("Discover 최초 무료 제공량 1,000을 초과한 사용량은 유료가 될 수 있습니다.")
+        print(f"현재 local billing estimate: {budget.estimated_used}")
+        print(f"무료 한도까지 남은 추정량: {max(0, 1000 - budget.estimated_used)}")
+        print(f"설정된 최대 유료 사용 가능 추정량: {budget.hard_limit - 1000}")
+        print("Dashboard가 최종 기준입니다. 아래 실행 확인은 유료 사용 가능성도 포함합니다.")
+
+
 def categories(value):
     tokens = value.replace(" ", "").split(",")
     if "4" in tokens:
@@ -101,7 +118,7 @@ def main(argv=None):
     parser.add_argument("--refresh", action="store_true", help="경고/확인 후 캐시 새로 조회")
     parser.add_argument("--diagnose", action="store_true", help="저장된 설정으로 최대 4회 API 진단 (별도 확인 필요)")
     parser.add_argument("--diagnose-compare", action="store_true",
-                        help="대체 검색/리뷰 언어 비교: 최대 5회, 로컬 추정 17 entities, 재시도 없음")
+                        help="대체 검색/리뷰 언어 비교: 최대 5회, 로컬 추정 5 entities, 재시도 없음")
     parser.add_argument("--diagnose-v2", action="store_true",
                         help="고정된 두 장소의 V2 리뷰 진단: 각 1회, 재시도 없음")
     parser.add_argument("--config", type=Path, help="부산 지역 이름 또는 저장된 검색 설정 JSON")
@@ -112,18 +129,25 @@ def main(argv=None):
                         help="shared: 지역당 검색 경로 하나 사용, per_category: 기존 카테고리별 검색")
     parser.add_argument("--run-entity-budget", type=positive_max,
                         help="이번 수집의 추가 로컬 예산 (기본 50, 누적 한도도 함께 적용)")
+    parser.add_argument("--sync-dashboard-usage", type=nonnegative_int,
+                        help="확인/백업 후 Dashboard 사용량으로 원장 동기화 (API 호출 없음)")
+    parser.add_argument("--review-priority", choices=("search_order", "review_count"),
+                        help="review_count: 신규 후보 최대 5곳의 상세 확인 후 전체 리뷰 수 순으로 조회")
     args = parser.parse_args(argv)
+    if args.sync_dashboard_usage is not None and any(
+            value for name, value in vars(args).items() if name != "sync_dashboard_usage"):
+        parser.error("--sync-dashboard-usage는 다른 옵션과 함께 사용할 수 없습니다.")
     if args.diagnose_v2 and (args.diagnose or args.diagnose_compare or args.refresh
                             or args.config is not None or args.max_locations is not None
                             or args.target_reviewed_locations is not None or args.search_strategy is not None
-                            or args.run_entity_budget is not None):
+                            or args.run_entity_budget is not None or args.review_priority is not None):
         parser.error("--diagnose-v2는 --dry-run 외 다른 실행 옵션과 함께 사용할 수 없습니다.")
     if args.diagnose and args.diagnose_compare:
         parser.error("--diagnose와 --diagnose-compare 중 하나만 선택하세요.")
     args.diagnose = args.diagnose or args.diagnose_compare
     if args.diagnose and (args.refresh or args.max_locations is not None
                          or args.target_reviewed_locations is not None or args.search_strategy is not None
-                         or args.run_entity_budget is not None):
+                         or args.run_entity_budget is not None or args.review_priority is not None):
         parser.error("--diagnose는 --refresh/--max-locations와 함께 사용할 수 없습니다.")
     if sys.version_info < (3, 12):
         parser.error("Python 3.12 이상이 필요합니다.")
@@ -133,6 +157,21 @@ def main(argv=None):
         log.info("실행 시작 dry_run=%s refresh=%s", args.dry_run, args.refresh)
         with output_lock(OUTPUT_DIR):
             budget = EntityBudgetManager(OUTPUT_DIR / "entity_usage.json", settings.hard_limit)
+            if args.sync_dashboard_usage is not None:
+                usage = args.sync_dashboard_usage
+                print(f"Local estimate: {budget.estimated_used}")
+                print(f"Dashboard actual usage: {usage}")
+                if usage > budget.hard_limit:
+                    print("WARNING: Dashboard 사용량이 hard limit보다 큽니다. 동기화를 거부합니다.")
+                    return 2
+                if input("Dashboard 값을 local billing baseline으로 사용할까요? [y/N]: ").strip().lower() != "y":
+                    return 0
+                backup = budget.sync_dashboard_usage(usage)
+                print(f"원장 백업: {backup}")
+                print("동기화 완료. Tripadvisor API 호출: 0회.")
+                print(budget.summary())
+                return 0
+            paid_usage_warning(budget)
             if args.diagnose_v2:
                 print(f"V2 리뷰 진단: {', '.join(LOCATION_IDS)} / 각 1회, 총 2회, 재시도 없음")
                 print(json.dumps(PARAMS, ensure_ascii=False))
@@ -200,14 +239,20 @@ def main(argv=None):
                 config["target_reviewed_locations"] = args.target_reviewed_locations
             if args.search_strategy is not None:
                 config["search_strategy"] = args.search_strategy
+            if args.review_priority is not None:
+                config["review_priority"] = args.review_priority
             config = validate_config(config)
             budget.limit_run(args.run_entity_budget or 50)
-            write_json(OUTPUT_DIR / "search_config.json", config)
+            if not args.dry_run:
+                write_json(OUTPUT_DIR / "search_config.json", config)
             estimates = plan(config, cache, budget, args.refresh)
             conflicts = cached_filter_conflicts(config, cache)
             print("\n========================================")
             print("DRY RUN" if args.dry_run else "Collection Plan")
             print(json.dumps({**config, **estimates}, ensure_ascii=False, indent=2))
+            if config["review_priority"] == "review_count":
+                print("리뷰 우선순위: 신규 후보 최대 5곳씩 상세를 확인하고 전체 리뷰 수가 많은 순서로 조회합니다.")
+                print("상세 조회도 예산을 사용합니다. 리뷰 수 누락은 0으로 간주하지 않고 그룹 뒤에서 조회합니다.")
             print(f"이번 실행 추가 로컬 예산: {args.run_entity_budget or 50} (누적 한도와 함께 적용)")
             if config["search_strategy"] == "shared":
                 print("효율 모드: 지역당 기존 검색 경로 하나를 이어가며 지역을 번갈아 처리합니다.")
@@ -218,8 +263,8 @@ def main(argv=None):
                 if parts > 1:
                     print(f"[분할 검색] {region['name']}: {parts}개 구역. 장소 수 한도는 전체 구역이 공유합니다.")
             print("행정구역: 지도 사각 범위 / 명소: 중심 주변 1km. 실제 행정 경계와 일치하지 않을 수 있습니다.")
-            print("검색 페이지당 최대 5 + 신규 상세 1/장소 + 신규 리뷰 1/장소.")
-            print("재시도 포함 상한은 최대 3배이며, 모든 시도는 남은 예산 내에서만 실행됩니다.")
+            print("현재 계정 관찰 기준: 검색/상세/리뷰 HTTP 시도당 로컬 추정량 1.")
+            print("검색/상세는 최대 3회 시도, 리뷰는 1회만 시도합니다. 모든 시도는 남은 예산 내에서 실행됩니다.")
             if estimates["additional_entities_with_all_retries"] > budget.remaining:
                 print("주의: 계획 상한이 남은 예산을 초과합니다. 예산 도달 시 중간 저장 후 종료합니다.")
             print("========================================")

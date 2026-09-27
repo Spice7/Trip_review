@@ -14,7 +14,7 @@ def test_comparison_requests_bounds_and_preservation(tmp_path):
     write_json(tmp_path / "reviews.json", [{"location_id": "1", "reviews": [], "review_count": 2}])
     before = (tmp_path / "reviews.json").read_bytes()
     plan = comparison_plan(cfg, tmp_path)
-    assert (plan["max_calls"], plan["max_entities"], plan["retries"]) == (5, 17, 0)
+    assert (plan["max_calls"], plan["max_entities"], plan["retries"]) == (5, 5, 0)
     session = Session([
         Response({"data": [{"location": classified(2, "Accommodation")}]}),
         Response({"data": []}), Response({"data": []}),
@@ -23,7 +23,7 @@ def test_comparison_requests_bounds_and_preservation(tmp_path):
     client = TripadvisorClient("offline", EntityBudgetManager(tmp_path / "usage.json"),
                                session=session, sleep=lambda _: None, max_attempts=1)
     path, report = run_diagnostics(plan, cfg, client, tmp_path)
-    assert client.budget.estimated_used == 17
+    assert client.budget.estimated_used == 5
     assert report["findings"][0]["finding"] == "category_mismatch"
     assert report["findings"][1]["finding"] == "empty_inconclusive"
     assert report["findings"][-1]["returned_count"] == 1

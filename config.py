@@ -43,6 +43,9 @@ def validate_config(data):
     cats = data.get("categories")
     maximum = data.get("max_locations")
     strategy = data.get("search_strategy", "shared")
+    priority = data.get("review_priority", "search_order")
+    if priority not in ("search_order", "review_count"):
+        raise ValueError("review_priority는 search_order 또는 review_count여야 합니다.")
     if strategy not in ("shared", "per_category"):
         raise ValueError("search_strategy는 shared 또는 per_category여야 합니다.")
     if not city or not isinstance(regions, list) or not regions:
@@ -79,5 +82,6 @@ def validate_config(data):
         validated.append(region)
     return {"city": city, "regions": validated,
             "search_strategy": strategy,
+            "review_priority": priority,
             "categories": list(dict.fromkeys(cats)), "max_locations": maximum,
             **({"target_reviewed_locations": target} if target is not None else {})}

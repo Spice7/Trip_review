@@ -42,7 +42,7 @@ def plan(config, cache, budget, refresh=False):
                 unknown += max(0, config["max_locations"] - len(selected))
     detail_calls = unknown + sum(refresh or cache.get("locations", i) is None for i in known)
     review_calls = unknown + sum(refresh or cache.get("reviews", i) is None for i in known)
-    entities = search_calls * PAGE_SIZE + detail_calls + review_calls
+    entities = search_calls + detail_calls + review_calls
     return {
         "search_sources": {r["name"]: sources(config, cache, r, refresh) for r in config["regions"]},
         "limit_scope": "per_region" if shared(config) else "per_region_category",
@@ -52,7 +52,7 @@ def plan(config, cache, budget, refresh=False):
         "estimated_maximum_detail_calls": detail_calls,
         "estimated_maximum_review_calls": review_calls,
         "additional_entities_without_retries": entities,
-        "additional_entities_with_all_retries": entities * MAX_ATTEMPTS,
+        "additional_entities_with_all_retries": (search_calls + detail_calls) * MAX_ATTEMPTS + review_calls,
         "current_accumulated_usage": budget.estimated_used,
         "estimated_total_without_retries": budget.estimated_used + entities,
         "hard_limit": budget.hard_limit, "remaining_budget": budget.remaining,
@@ -90,7 +90,7 @@ class Collector:
                     record["location_id"], category, record.get("actual_categories"))
         return False
 
-    def collect_place(self, item, region, category):
+    def collect_place(self, item, region, category, *, prepare_only=False):
         allowed = self.config["categories"] if shared(self.config) else [category]
         identity = item["location_id"]
         self.stats.candidates.add((region["name"], category, identity))
@@ -131,6 +131,8 @@ class Collector:
         except (APIError, SchemaError) as exc:
             self.failures += 1
             log.error("[Details] location_id=%s %s", identity, exc)
+        if prepare_only:
+            return True
         if identity in self.attempted:
             return bool(record.get("reviews"))
         self.attempted.add(identity)
@@ -255,6 +257,10 @@ class Collector:
         def consume():
             self.stats.candidates.update((region["name"], category, p["location_id"])
                                          for p in selected[:maximum])
+            if self.config.get("review_priority") == "review_count":
+                yield from self.consume_prioritized(selected[:maximum], used, reviewed,
+                                                    target, region, category)
+                return
             batch = 0
             for item in selected[:maximum]:
                 if target is not None and len(reviewed) >= target:
@@ -291,6 +297,56 @@ class Collector:
         if not state["items"] and state["exhausted"]:
             log.warning("%s %s / %s: 검색 결과가 없습니다.",
                         self.config["city"], region["name"], category)
+
+    def consume_prioritized(self, items, used, reviewed, target, region, category):
+        def reached():
+            return target is not None and len(reviewed) >= target
+
+        def finish(item):
+            used.add(item["location_id"])
+            if self.collect_place(item, region, category):
+                reviewed.add(item["location_id"])
+
+        # Count cached successes before paying to prepare any new candidates.
+        batch = 0
+        for item in items:
+            identity = item["location_id"]
+            if reached():
+                return
+            if identity not in used and (identity in self.attempted or
+                    (not self.refresh and self.cache.get("reviews", identity) is not None)):
+                finish(item)
+                batch += 1
+                if batch == PAGE_SIZE:
+                    batch = 0
+                    yield
+        if batch:
+            yield
+        pending = [item for item in items if item["location_id"] not in used]
+        while pending and not reached():
+            ready = []
+            for item in pending[:PAGE_SIZE]:
+                identity = item["location_id"]
+                has_details = identity in self.detail_results or (
+                    not self.refresh and self.cache.get("locations", identity) is not None)
+                # Leave at least one unit for a review rather than spending it all on prefetch.
+                if ready and not has_details and self.budget.remaining <= 1:
+                    break
+                if self.collect_place(item, region, category, prepare_only=True):
+                    ready.append(item)
+                else:
+                    used.add(identity)  # Known category mismatch, no review request.
+
+            def priority(item):
+                count = self.detail_results.get(item["location_id"], {}).get("review_count")
+                return (0, -count) if type(count) is int and count >= 0 else (1, 0)
+
+            for item in sorted(ready, key=priority):
+                if reached():
+                    return  # Details stay cached; resume can process unreviewed candidates later.
+                finish(item)
+            pending = [item for item in pending if item["location_id"] not in used]
+            yield
 
     def collect_page(self, area, region, category, page, state, cursor,
                      progress, area_index, area_count, key):
