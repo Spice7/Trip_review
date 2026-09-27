@@ -1,0 +1,6 @@
+{
+  "city": "부산",
+  "regions": ["광안리", "수영구", "남구"],
+  "categories": ["RESTAURANT"],
+  "max_locations": 5
+}
